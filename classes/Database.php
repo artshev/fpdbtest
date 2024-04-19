@@ -70,6 +70,9 @@ class Database implements DatabaseInterface
             }
         }
 
+        // Финальное преобразование запроса
+        $query = preg_replace(['#[{}]+#u', '#\s+#us'], ['', ' '], $query);
+
         // Замена параметров на значения
         $index = 0;
         $binds = array_values($binds);
@@ -81,7 +84,7 @@ class Database implements DatabaseInterface
             $query
         );
 
-        return trim(preg_replace(['#[{}]+#u', '#\s+#us'], ['', ' '], $query));
+        return trim($query);
     }
 
     /**
