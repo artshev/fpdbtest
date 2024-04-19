@@ -7,9 +7,9 @@ use mysqli;
 
 class Database implements DatabaseInterface
 {
-    private mysqli $mysqli;
-    protected static string $bindPattern  = '#(\?[\#\w\d]*)#us';
-    protected static string $blockPattern = '#({[^}]*})#us';
+    private mysqli          $mysqli;
+    protected static string $specifierPattern = '#(\?[\#\w\d]*)#us';
+    protected static string $blockPattern     = '#{(.*?)}#us';
 
     public function __construct(mysqli $mysqli)
     {
@@ -21,31 +21,33 @@ class Database implements DatabaseInterface
      */
     public function buildQuery(string $query, array $args = []): string
     {
-        $this->validateBrackets($query);
+        if (!$this->isBracketsValid($query)) {
+            throw new Exception('Invalid blocks syntax');
+        }
 
         $binds = [];
 
         // Получение параметров ? и их позиций из запроса
         $matches = [];
-        preg_match_all(self::$bindPattern, $query, $matches, PREG_OFFSET_CAPTURE);
+        preg_match_all(self::$specifierPattern, $query, $matches, PREG_OFFSET_CAPTURE);
 
-        foreach ($matches[0] as [$pattern, $position]) {
+        foreach ($matches[0] as [$specifier, $position]) {
             $binds[] = [
-                'position' => $position,
-                'pattern'  => $pattern,
-                'value'    => $this->prepareArg(current($args), $pattern)
+                'specifier' => $specifier,
+                'position'  => $position,
+                'value'     => $this->prepareArg(current($args), $specifier),
             ];
             next($args);
         }
 
         // Пост-проверка синтаксиса параметров
-        if (!empty(array_diff(array_column($binds, 'pattern'), ['?', '?d', '?f', '?a', '?#']))) {
-            throw new Exception('Invalid query params syntax');
+        if (!empty(array_diff(array_column($binds, 'specifier'), ['?', '?d', '?f', '?a', '?#']))) {
+            throw new Exception('Invalid params syntax');
         }
 
         // Пост-проверка соответствия количества параметров и аргументов
         if (count($binds) != count($args)) {
-            throw new Exception('Invalid query args count');
+            throw new Exception('Invalid args count');
         }
 
         // Массив параметров в формате Позиция => Значение
@@ -63,22 +65,23 @@ class Database implements DatabaseInterface
 
             // Проверка налчиия SKIP параметра внутри блока
             if (array_search($this->skip(), $items)) {
-                $value = str_repeat(' ', $length); // Замена блока на пустую строку той же длины
-                $binds = array_diff_key($binds, $items); // Удаление параметров блока
-            } else {
-                $value = str_replace(['{', '}'], ' ', $block); // Замена на блок без скобок, той же длины
+                $query = substr_replace($query, str_repeat(' ', $length), $start, $length); // Удаление блока в запросе
+                $binds = array_diff_key($binds, $items);                                    // Удаление параметров блока
             }
-
-            // Обновление блока в запросе
-            $query = substr_replace($query, $value, $start, $length);
         }
 
-        // Последовательно заменяем каждый параметр на его значение
-        foreach ($binds as $bind) {
-            $query = preg_replace(self::$bindPattern, $bind, $query, 1);
-        }
+        // Замена параметров на значения
+        $index = 0;
+        $binds = array_values($binds);
 
-        return trim(preg_replace('#\s+#u', ' ', $query));
+        $query = preg_replace_callback(self::$specifierPattern,
+            function ($bind) use (&$index, $binds) {
+                return $binds[$index++];
+            },
+            $query
+        );
+
+        return trim(preg_replace(['#[{}]+#u', '#\s+#us'], ['', ' '], $query));
     }
 
     /**
@@ -92,10 +95,10 @@ class Database implements DatabaseInterface
 
     /**
      * @param  string  $query
-     * @return void
+     * @return bool
      * @throws Exception
      */
-    protected function validateBrackets(string $query): void
+    protected function isBracketsValid(string $query): bool
     {
         $inspector = 0;
         $brackets = preg_replace('#[^{}]*#u', '', $query);
@@ -104,9 +107,11 @@ class Database implements DatabaseInterface
             $inspector += ($bracket === "{" ? 1 : -1);
 
             if (0 > $inspector || $inspector > 1) {
-                throw new Exception('Invalid query params syntax');
+                return false;
             }
         }
+
+        return true;
     }
 
     /**
@@ -115,13 +120,13 @@ class Database implements DatabaseInterface
      * @return int|float|string|null
      * @throws Exception
      */
-    protected function prepareArg(mixed $arg, mixed $type = null): null|int|float|string
+    protected function prepareArg(mixed $arg, mixed $specifier = null): null|int|float|string
     {
         if ($arg === $this->skip()) {
             return $this->skip();
         }
 
-        switch ($type) {
+        switch ($specifier) {
             case 'column':
                 if (mb_strlen((string) $arg) === 0) {
                     throw new Exception('Table column name can\'t be empty');
@@ -140,7 +145,7 @@ class Database implements DatabaseInterface
                 $arg = (array) $arg; // Одиночные значения преобразуем в массив для унификации
 
                 if (empty($arg)) {
-                    throw new Exception(sprintf('Args "%s" types can\'t be empty', $type));
+                    throw new Exception(sprintf('Arg "%s" types can\'t be empty', $specifier));
                 }
 
                 // Строгая проверка - последовательным считается массив с порядком ключей от 0 .. n и шагом +1
@@ -165,7 +170,7 @@ class Database implements DatabaseInterface
                 $arg = (array) $arg; // Одиночные значения преобразуем в массив для унификации
 
                 if (empty($arg)) {
-                    throw new Exception(sprintf('Args "%s" types can\'t be empty', $type));
+                    throw new Exception(sprintf('Arg "%s" types can\'t be empty', $specifier));
                 }
 
                 $arg = array_map(
@@ -183,7 +188,7 @@ class Database implements DatabaseInterface
                     is_int($arg)    => (int) $arg,
                     is_bool($arg)   => (int) $arg,
                     is_null($arg)   => 'NULL',
-                    default         => throw new Exception('Denied arg type')
+                    default         => throw new Exception('Arg denied type')
                 };
         }
     }
